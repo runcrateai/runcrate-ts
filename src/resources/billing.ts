@@ -1,3 +1,4 @@
+import { RuncrateError } from "../errors.js";
 import { PaginatedResponse } from "../pagination.js";
 import { newIdempotencyKey, type Transport } from "../transport.js";
 import type {
@@ -55,21 +56,26 @@ export class Billing {
    * billing permission. Every outcome answers here, including a decline or a charge that needs
    * a person to confirm it: read `status`. To read a `processing` or `requires_action` top-up
    * again, call this with the same `idempotencyKey` (returned on the result): the same key never
-   * charges twice.
+   * charges twice. An error thrown here carries the key as `err.idempotencyKey`.
    */
   async topUp(params: TopUpParams): Promise<TopUp> {
-    const { data } = await this.transport.request<TopUp>({
-      method: "POST",
-      path: "/api/v1/billing/topups",
-      body: {
-        amount_usd: params.amountUsd,
-        // Made once per call, so a retry of this call sends the same key and charges at most once.
-        idempotency_key: params.idempotencyKey ?? newIdempotencyKey(),
-      },
-      // The route dedupes on the key: sending it again answers the same top-up.
-      idempotent: true,
-    });
-    return data;
+    // Made once per call, so every retry of this call sends the same key and charges at most once.
+    const key = params.idempotencyKey ?? newIdempotencyKey();
+    try {
+      const { data } = await this.transport.request<TopUp>({
+        method: "POST",
+        path: "/api/v1/billing/topups",
+        body: { amount_usd: params.amountUsd, idempotency_key: key },
+        // Also as the header, so the transport waits and resends while that top-up is being charged.
+        idempotencyKey: key,
+        // The route dedupes on the key: sending it again answers the same top-up.
+        idempotent: true,
+      });
+      return data;
+    } catch (err) {
+      if (err instanceof RuncrateError) err.idempotencyKey = key;
+      throw err;
+    }
   }
 
   async getAutoRecharge(): Promise<AutoRecharge> {

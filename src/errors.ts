@@ -1,6 +1,12 @@
 import type { Job } from "./types.js";
 
 export class RuncrateError extends Error {
+  /**
+   * The idempotency key of the call that failed, when it had one (`billing.topUp`). Send the
+   * same key again to read or finish that call instead of starting a new one.
+   */
+  idempotencyKey?: string;
+
   constructor(message: string) {
     super(message);
     this.name = "RuncrateError";

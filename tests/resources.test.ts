@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Runcrate } from "../src/client.js";
+import { ConflictError, PermissionDeniedError } from "../src/errors.js";
 import { mockFetch, TEST_API_KEY } from "./helpers.js";
 
 function makeClient() {
@@ -453,6 +454,58 @@ describe("Billing resource", () => {
     expect(sentKey(calls[1]!.init)).toBe(sentKey(calls[0]!.init));
     expect(typeof sentKey(calls[0]!.init)).toBe("string");
     expect(result.status).toBe("processing");
+  });
+
+  it("waits and resends the same key while that top-up is being charged", async () => {
+    vi.useFakeTimers();
+    try {
+      const { calls } = mockFetch([
+        {
+          status: 409,
+          headers: { "retry-after": "5" },
+          body: { error: { code: "conflict", message: "being charged", details: { reason: "idempotency_in_progress" } } },
+        },
+        { body: { data: { id: "tu4", status: "succeeded", amount_usd: 40, idempotency_key: "k", invoice_number: "RC-1", balance_usd: 90, created_at: "2026-10-26T10:00:00Z" } } },
+      ]);
+      const rc = new Runcrate({ apiKey: TEST_API_KEY, maxRetries: 1 });
+
+      const pending = rc.billing.topUp({ amountUsd: 40 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await pending;
+      expect(calls).toHaveLength(2);
+      const key = sentKey(calls[0]!.init);
+      expect(sentKey(calls[1]!.init)).toBe(key);
+      expect(new Headers(calls[0]!.init.headers).get("Idempotency-Key")).toBe(key);
+      expect(new Headers(calls[1]!.init.headers).get("Idempotency-Key")).toBe(key);
+      expect(result.status).toBe("succeeded");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not resend a key reused for another amount", async () => {
+    const { calls } = mockFetch([
+      { status: 409, body: { error: { code: "IDEMPOTENCY_KEY_REUSED", message: "used for $20.00" } } },
+    ]);
+    const rc = new Runcrate({ apiKey: TEST_API_KEY, maxRetries: 2 });
+
+    const error = await rc.billing.topUp({ amountUsd: 50, idempotencyKey: "job-42" }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("an error from a top-up carries the key it made", async () => {
+    const { calls } = mockFetch([
+      { status: 403, body: { error: { code: "BILLING_PERMISSION_REQUIRED", message: "no permission" } } },
+    ]);
+    const rc = makeClient();
+
+    const error = await rc.billing.topUp({ amountUsd: 50 }).catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(PermissionDeniedError);
+    if (!(error instanceof PermissionDeniedError)) return;
+    expect(error.code).toBe("BILLING_PERMISSION_REQUIRED");
+    expect(typeof error.idempotencyKey).toBe("string");
+    expect(error.idempotencyKey).toBe(sentKey(calls[0]!.init));
   });
 
   it("gets auto-recharge", async () => {
