@@ -350,14 +350,143 @@ describe("Storage resource", () => {
   });
 });
 
+/** The idempotency_key a request sent in its JSON body. */
+function sentKey(init: RequestInit): unknown {
+  const body: unknown = JSON.parse(String(init.body));
+  return body && typeof body === "object" && "idempotency_key" in body ? body.idempotency_key : undefined;
+}
+
 describe("Billing resource", () => {
-  it("gets balance", async () => {
-    const balance = { creditsBalance: 50.0, originalBalance: 100.0, activeUsageCost: 2.5 };
-    mockFetch([{ body: { data: balance } }]);
+  it("gets balance with runway", async () => {
+    mockFetch([{
+      body: {
+        data: {
+          creditsBalance: 50.0,
+          activeUsageCost: 2.5,
+          floating_balance_usd: 47.5,
+          burn_usd_per_hour: 2.5,
+          runway_hours: 19,
+        },
+      },
+    }]);
     const rc = makeClient();
 
     const result = await rc.billing.getBalance();
-    expect(result).toEqual(balance);
+    expect(result).toEqual({
+      creditsBalance: 50.0,
+      activeUsageCost: 2.5,
+      floatingBalanceUsd: 47.5,
+      burnUsdPerHour: 2.5,
+      runwayHours: 19,
+    });
+  });
+
+  it("tops up with the given idempotency key", async () => {
+    const { calls } = mockFetch([{
+      body: {
+        data: {
+          id: "tu1",
+          status: "succeeded",
+          amount_usd: 50,
+          idempotency_key: "job-42",
+          invoice_number: "RC-000123",
+          balance_usd: 104.12,
+          created_at: "2026-10-26T10:00:00Z",
+        },
+      },
+    }]);
+    const rc = makeClient();
+
+    const result = await rc.billing.topUp({ amountUsd: 50, idempotencyKey: "job-42" });
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(calls[0]!.url).toContain("/api/v1/billing/topups");
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ amount_usd: 50, idempotency_key: "job-42" });
+    expect(result).toMatchObject({
+      status: "succeeded",
+      amountUsd: 50,
+      idempotencyKey: "job-42",
+      invoiceNumber: "RC-000123",
+      balanceUsd: 104.12,
+    });
+  });
+
+  it("makes an idempotency key when none is given and returns it", async () => {
+    const calls: RequestInit[] = [];
+    // Answers with whatever key was sent, as the API echoes it.
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(init);
+      return new Response(JSON.stringify({
+        data: {
+          id: "tu2",
+          status: "requires_action",
+          amount_usd: 20,
+          idempotency_key: sentKey(init),
+          invoice_number: null,
+          confirm_url: "https://www.runcrate.ai/dashboard/billing?action=confirm-top-up",
+          expires_at: "2026-10-27T10:00:00Z",
+          created_at: "2026-10-26T10:00:00Z",
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    const rc = makeClient();
+
+    const first = await rc.billing.topUp({ amountUsd: 20 });
+    const second = await rc.billing.topUp({ amountUsd: 20 });
+    const key = sentKey(calls[0]!);
+    expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(first.idempotencyKey).toBe(key);
+    expect(first.status).toBe("requires_action");
+    expect(first.confirmUrl).toContain("confirm-top-up");
+    // Each call is a new top-up, so each gets its own key.
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+  });
+
+  it("retries a top-up with the same idempotency key", async () => {
+    const { calls } = mockFetch([
+      { status: 503, body: { error: { code: "service_unavailable", message: "busy" } } },
+      { body: { data: { id: "tu3", status: "processing", amount_usd: 30, idempotency_key: "k", invoice_number: null, created_at: "2026-10-26T10:00:00Z" } } },
+    ]);
+    const rc = new Runcrate({ apiKey: TEST_API_KEY, maxRetries: 1 });
+
+    const result = await rc.billing.topUp({ amountUsd: 30 });
+    expect(calls).toHaveLength(2);
+    expect(sentKey(calls[1]!.init)).toBe(sentKey(calls[0]!.init));
+    expect(typeof sentKey(calls[0]!.init)).toBe("string");
+    expect(result.status).toBe("processing");
+  });
+
+  it("gets auto-recharge", async () => {
+    mockFetch([{
+      body: { data: { enabled: true, threshold_usd: 20, target_usd: 100, last_failure_reason: null, last_failure_at: null } },
+    }]);
+    const rc = makeClient();
+
+    const result = await rc.billing.getAutoRecharge();
+    expect(result).toEqual({ enabled: true, thresholdUsd: 20, targetUsd: 100, lastFailureReason: null, lastFailureAt: null });
+  });
+
+  it("sets auto-recharge with a PUT of threshold_usd and target_usd", async () => {
+    const { calls } = mockFetch([{
+      body: { data: { enabled: false, threshold_usd: 25, target_usd: 200, last_failure_reason: null, last_failure_at: null } },
+    }]);
+    const rc = makeClient();
+
+    const result = await rc.billing.setAutoRecharge({ enabled: false, thresholdUsd: 25, targetUsd: 200 });
+    expect(calls[0]!.init.method).toBe("PUT");
+    expect(calls[0]!.url).toContain("/api/v1/billing/auto-recharge");
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ enabled: false, threshold_usd: 25, target_usd: 200 });
+    expect(result.thresholdUsd).toBe(25);
+    expect(result.targetUsd).toBe(200);
+  });
+
+  it("lists payment methods camelCased", async () => {
+    mockFetch([{
+      body: { data: [{ type: "card", brand: "visa", last4: "4242", exp_month: 12, exp_year: 2030, default: true }] },
+    }]);
+    const rc = makeClient();
+
+    const result = await rc.billing.listPaymentMethods();
+    expect(result).toEqual([{ type: "card", brand: "visa", last4: "4242", expMonth: 12, expYear: 2030, default: true }]);
   });
 
   it("lists transactions with pagination", async () => {
