@@ -381,7 +381,73 @@ interface StorageRegion {
 interface Balance {
     creditsBalance: number;
     activeUsageCost: number;
+    /** The balance net of what the running instances have cost so far, in USD. */
+    floatingBalanceUsd: number;
+    /** What the running instances cost together, in USD an hour. */
+    burnUsdPerHour: number;
+    /** Hours the floating balance lasts at that rate. `null` when nothing runs. */
+    runwayHours: number | null;
     [key: string]: unknown;
+}
+/**
+ * Where a top-up stands. `succeeded`: the balance has the credit. `processing`: the payment is
+ * on its way; send the same idempotency key again to read it. `requires_action`: a signed-in
+ * owner or manager must confirm it at `confirmUrl`; nothing is charged until then.
+ * `declined`: nothing was charged (see `reason` and `message`).
+ */
+type TopUpStatus = "succeeded" | "processing" | "requires_action" | "declined";
+interface TopUp {
+    id: string;
+    status: TopUpStatus;
+    amountUsd: number;
+    /** The key this top-up answers to. Send it again to read the same top-up's current status. */
+    idempotencyKey: string;
+    invoiceNumber: string | null;
+    /** The balance after the credit. Only when `status` is `succeeded`. */
+    balanceUsd?: number;
+    /** Where a signed-in owner or manager confirms it. Only when `status` is `requires_action`. */
+    confirmUrl?: string;
+    /** When the confirmation link stops working. Only when `status` is `requires_action`. */
+    expiresAt?: string | null;
+    /** Why it was declined. Only when `status` is `declined`. */
+    reason?: "card_declined" | "payment_blocked" | "authentication_required" | (string & {});
+    /** A sentence saying what happened and what to do. Only when `status` is `declined`. */
+    message?: string;
+    createdAt: string;
+}
+interface TopUpParams {
+    /** USD to add, 20 to 10,000, in dollars and cents. */
+    amountUsd: number;
+    /**
+     * Makes the top-up safe to send again: the same key answers the same top-up instead of
+     * charging twice. When omitted the SDK makes a new one (a UUID) and returns it on the result.
+     */
+    idempotencyKey?: string;
+}
+interface AutoRecharge {
+    enabled: boolean;
+    /** Recharge when the balance falls below this, in USD. */
+    thresholdUsd: number | null;
+    /** Recharge back up to this, in USD. */
+    targetUsd: number | null;
+    lastFailureReason: string | null;
+    lastFailureAt: string | null;
+}
+interface SetAutoRechargeParams {
+    enabled: boolean;
+    /** 20 to 5,000 USD. Required even to turn auto-recharge off. */
+    thresholdUsd: number;
+    /** 50 to 10,000 USD, above `thresholdUsd`. Required even to turn auto-recharge off. */
+    targetUsd: number;
+}
+interface PaymentMethod {
+    type: "card" | (string & {});
+    brand: string | null;
+    last4: string | null;
+    expMonth: number | null;
+    expYear: number | null;
+    /** Whether top-ups and auto-recharge charge this one. */
+    default: boolean;
 }
 interface Transaction {
     id: string;
@@ -959,6 +1025,22 @@ declare class Billing {
     getBalance(): Promise<Balance>;
     listTransactions(params?: TransactionListParams): Promise<PaginatedResponse<Transaction>>;
     usage(params?: UsageParams): Promise<UsageSummary>;
+    /**
+     * Adds credit to the balance by charging the workspace's default card. Needs a key with the
+     * billing permission. Every outcome answers here, including a decline or a charge that needs
+     * a person to confirm it: read `status`. To read a `processing` or `requires_action` top-up
+     * again, call this with the same `idempotencyKey` (returned on the result): the same key never
+     * charges twice. An error thrown here carries the key as `err.idempotencyKey`.
+     */
+    topUp(params: TopUpParams): Promise<TopUp>;
+    getAutoRecharge(): Promise<AutoRecharge>;
+    /**
+     * Turns auto-recharge on or off. `thresholdUsd` and `targetUsd` are required either way. Needs
+     * a key with the billing permission, made by a workspace owner or manager.
+     */
+    setAutoRecharge(params: SetAutoRechargeParams): Promise<AutoRecharge>;
+    /** The workspace's saved cards. Cards are added in the dashboard, never by API. */
+    listPaymentMethods(): Promise<PaymentMethod[]>;
 }
 
 declare class Templates {
@@ -1177,6 +1259,11 @@ declare class Runcrate {
 }
 
 declare class RuncrateError extends Error {
+    /**
+     * The idempotency key of the call that failed, when it had one (`billing.topUp`). Send the
+     * same key again to read or finish that call instead of starting a new one.
+     */
+    idempotencyKey?: string;
     constructor(message: string);
 }
 declare class ApiError extends RuncrateError {
@@ -1229,4 +1316,4 @@ declare class JobWaitTimeoutError extends TimeoutError {
     constructor(message: string, job: Job);
 }
 
-export { ApiError, AuthenticationError, BadRequestError, type Balance, type ChatChoice, type ChatCompletion, type ChatCompletionParams, type ChatMessage, type ChatUsage, ConflictError, ConnectionError, type CreateScheduleParams, type Environment, type EnvironmentCreateParams, type EnvironmentUpdateParams, type GpuCandidate, type ImageData, type ImageGeneration, type ImageGenerationParams, type Instance, type InstanceCreateParams, type InstanceListParams, type InstanceStatus, type InstanceStopReason, type InstanceType, type InstanceTypeListParams, type InstanceUpdateParams, InsufficientCreditsError, InternalServerError, type Job, type JobArtifact, type JobAttempt, type JobCode, type JobCodeInfo, type JobEvent, type JobGroup, type JobGroupRunParams, type JobListParams, type JobLogChunk, type JobLogs, type JobLogsParams, type JobMetricPoint, type JobQueueReason, type JobRerunParams, type JobRetryOn, type JobRunParams, type JobStatus, type JobSubmitOptions, type JobUpload, type JobWaitOptions, JobWaitTimeoutError, type JobWebhookEvent, type ListMeta, NotFoundError, PaginatedResponse, PermissionDeniedError, RateLimitError, type RunNowResult, Runcrate, type RuncrateConfig, RuncrateError, type SSHKey, type SSHKeyCreateParams, type Schedule, type ScheduleDeleteResult, type ScheduleInstanceSpec, type ScheduleJobSpec, type ScheduleKind, type ScheduleOverlap, type ScheduleRunAsCredential, type ScheduleRunStatus, type ScheduleSpec, type ScheduleTiming, type ScheduledInstanceSpec, type ScheduledJob, type ScheduledJobSpec, type Secret, type StorageListParams, type StorageVolume, type SubmittedJob, type SubmittedJobGroup, type TTSParams, type Template, type TemplateListParams, TimeoutError, type Transaction, type TransactionListParams, type TranscribeParams, type Transcription, UnprocessableEntityError, type UpdateScheduleParams, type UsageParams, type UsageSummary, type VideoGenerationParams, type VideoJob, type VideoSaveParams, Runcrate as default, isJobFinished };
+export { ApiError, AuthenticationError, type AutoRecharge, BadRequestError, type Balance, type ChatChoice, type ChatCompletion, type ChatCompletionParams, type ChatMessage, type ChatUsage, ConflictError, ConnectionError, type CreateScheduleParams, type Environment, type EnvironmentCreateParams, type EnvironmentUpdateParams, type GpuCandidate, type ImageData, type ImageGeneration, type ImageGenerationParams, type Instance, type InstanceCreateParams, type InstanceListParams, type InstanceStatus, type InstanceStopReason, type InstanceType, type InstanceTypeListParams, type InstanceUpdateParams, InsufficientCreditsError, InternalServerError, type Job, type JobArtifact, type JobAttempt, type JobCode, type JobCodeInfo, type JobEvent, type JobGroup, type JobGroupRunParams, type JobListParams, type JobLogChunk, type JobLogs, type JobLogsParams, type JobMetricPoint, type JobQueueReason, type JobRerunParams, type JobRetryOn, type JobRunParams, type JobStatus, type JobSubmitOptions, type JobUpload, type JobWaitOptions, JobWaitTimeoutError, type JobWebhookEvent, type ListMeta, NotFoundError, PaginatedResponse, type PaymentMethod, PermissionDeniedError, RateLimitError, type RunNowResult, Runcrate, type RuncrateConfig, RuncrateError, type SSHKey, type SSHKeyCreateParams, type Schedule, type ScheduleDeleteResult, type ScheduleInstanceSpec, type ScheduleJobSpec, type ScheduleKind, type ScheduleOverlap, type ScheduleRunAsCredential, type ScheduleRunStatus, type ScheduleSpec, type ScheduleTiming, type ScheduledInstanceSpec, type ScheduledJob, type ScheduledJobSpec, type Secret, type SetAutoRechargeParams, type StorageListParams, type StorageVolume, type SubmittedJob, type SubmittedJobGroup, type TTSParams, type Template, type TemplateListParams, TimeoutError, type TopUp, type TopUpParams, type TopUpStatus, type Transaction, type TransactionListParams, type TranscribeParams, type Transcription, UnprocessableEntityError, type UpdateScheduleParams, type UsageParams, type UsageSummary, type VideoGenerationParams, type VideoJob, type VideoSaveParams, Runcrate as default, isJobFinished };
