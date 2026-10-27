@@ -13,6 +13,11 @@ var promises$1 = require('stream/promises');
 
 // src/errors.ts
 var RuncrateError = class extends Error {
+  /**
+   * The idempotency key of the call that failed, when it had one (`billing.topUp`). Send the
+   * same key again to read or finish that call instead of starting a new one.
+   */
+  idempotencyKey;
   constructor(message) {
     super(message);
     this.name = "RuncrateError";
@@ -694,6 +699,62 @@ var Billing = class {
       method: "GET",
       path: "/api/v1/billing/usage",
       params: params ? removeUndefined(params) : void 0
+    });
+    return data;
+  }
+  /**
+   * Adds credit to the balance by charging the workspace's default card. Needs a key with the
+   * billing permission. Every outcome answers here, including a decline or a charge that needs
+   * a person to confirm it: read `status`. To read a `processing` or `requires_action` top-up
+   * again, call this with the same `idempotencyKey` (returned on the result): the same key never
+   * charges twice. An error thrown here carries the key as `err.idempotencyKey`.
+   */
+  async topUp(params) {
+    const key = params.idempotencyKey ?? newIdempotencyKey();
+    try {
+      const { data } = await this.transport.request({
+        method: "POST",
+        path: "/api/v1/billing/topups",
+        body: { amount_usd: params.amountUsd, idempotency_key: key },
+        // Also as the header, so the transport waits and resends while that top-up is being charged.
+        idempotencyKey: key,
+        // The route dedupes on the key: sending it again answers the same top-up.
+        idempotent: true
+      });
+      return data;
+    } catch (err) {
+      if (err instanceof RuncrateError) err.idempotencyKey = key;
+      throw err;
+    }
+  }
+  async getAutoRecharge() {
+    const { data } = await this.transport.request({
+      method: "GET",
+      path: "/api/v1/billing/auto-recharge"
+    });
+    return data;
+  }
+  /**
+   * Turns auto-recharge on or off. `thresholdUsd` and `targetUsd` are required either way. Needs
+   * a key with the billing permission, made by a workspace owner or manager.
+   */
+  async setAutoRecharge(params) {
+    const { data } = await this.transport.request({
+      method: "PUT",
+      path: "/api/v1/billing/auto-recharge",
+      body: {
+        enabled: params.enabled,
+        threshold_usd: params.thresholdUsd,
+        target_usd: params.targetUsd
+      }
+    });
+    return data;
+  }
+  /** The workspace's saved cards. Cards are added in the dashboard, never by API. */
+  async listPaymentMethods() {
+    const { data } = await this.transport.request({
+      method: "GET",
+      path: "/api/v1/billing/payment-methods"
     });
     return data;
   }
