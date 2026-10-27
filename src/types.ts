@@ -431,7 +431,79 @@ export interface StorageRegion {
 export interface Balance {
   creditsBalance: number;
   activeUsageCost: number;
+  /** The balance net of what the running instances have cost so far, in USD. */
+  floatingBalanceUsd: number;
+  /** What the running instances cost together, in USD an hour. */
+  burnUsdPerHour: number;
+  /** Hours the floating balance lasts at that rate. `null` when nothing runs. */
+  runwayHours: number | null;
   [key: string]: unknown;
+}
+
+/**
+ * Where a top-up stands. `succeeded`: the balance has the credit. `processing`: the payment is
+ * on its way; send the same idempotency key again to read it. `requires_action`: a signed-in
+ * owner or manager must confirm it at `confirmUrl`; nothing is charged until then.
+ * `declined`: nothing was charged (see `reason` and `message`).
+ */
+export type TopUpStatus = "succeeded" | "processing" | "requires_action" | "declined";
+
+export interface TopUp {
+  id: string;
+  status: TopUpStatus;
+  amountUsd: number;
+  /** The key this top-up answers to. Send it again to read the same top-up's current status. */
+  idempotencyKey: string;
+  invoiceNumber: string | null;
+  /** The balance after the credit. Only when `status` is `succeeded`. */
+  balanceUsd?: number;
+  /** Where a signed-in owner or manager confirms it. Only when `status` is `requires_action`. */
+  confirmUrl?: string;
+  /** When the confirmation link stops working. Only when `status` is `requires_action`. */
+  expiresAt?: string | null;
+  /** Why it was declined. Only when `status` is `declined`. */
+  reason?: "card_declined" | "payment_blocked" | "authentication_required" | (string & {});
+  /** A sentence saying what happened and what to do. Only when `status` is `declined`. */
+  message?: string;
+  createdAt: string;
+}
+
+export interface TopUpParams {
+  /** USD to add, 20 to 10,000, in dollars and cents. */
+  amountUsd: number;
+  /**
+   * Makes the top-up safe to send again: the same key answers the same top-up instead of
+   * charging twice. When omitted the SDK makes a new one (a UUID) and returns it on the result.
+   */
+  idempotencyKey?: string;
+}
+
+export interface AutoRecharge {
+  enabled: boolean;
+  /** Recharge when the balance falls below this, in USD. */
+  thresholdUsd: number | null;
+  /** Recharge back up to this, in USD. */
+  targetUsd: number | null;
+  lastFailureReason: string | null;
+  lastFailureAt: string | null;
+}
+
+export interface SetAutoRechargeParams {
+  enabled: boolean;
+  /** 20 to 5,000 USD. Required even to turn auto-recharge off. */
+  thresholdUsd: number;
+  /** 50 to 10,000 USD, above `thresholdUsd`. Required even to turn auto-recharge off. */
+  targetUsd: number;
+}
+
+export interface PaymentMethod {
+  type: "card" | (string & {});
+  brand: string | null;
+  last4: string | null;
+  expMonth: number | null;
+  expYear: number | null;
+  /** Whether top-ups and auto-recharge charge this one. */
+  default: boolean;
 }
 
 export interface Transaction {

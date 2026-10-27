@@ -301,8 +301,65 @@ console.log(`Found ${templates.total} templates`);
 
 ```typescript
 const balance = await rc.billing.getBalance();
+// floatingBalanceUsd: the balance net of running instances; burnUsdPerHour; runwayHours (null when nothing runs)
+console.log(`$${balance.floatingBalanceUsd} left, about ${balance.runwayHours ?? '∞'} hours`);
+
 const txns = await rc.billing.listTransactions({ limit: 20 });
 const usage = await rc.billing.usage({ from: '2025-01-01', to: '2025-01-31' });
+```
+
+#### Top-ups and auto-recharge
+
+An agent or program can add credit by charging the workspace's default card. The API key needs the **billing permission**, which a workspace owner or manager turns on (with daily and monthly caps) on the dashboard's API keys page. Cards are added in the dashboard, never by API.
+
+```typescript
+const topUp = await rc.billing.topUp({ amountUsd: 50 }); // $20 to $10,000
+
+switch (topUp.status) {
+  case 'succeeded':
+    console.log(`New balance: $${topUp.balanceUsd}`);
+    break;
+  case 'requires_action':
+    // The bank wants a person to confirm it. Nothing is charged until a signed-in
+    // owner or manager opens this link (before topUp.expiresAt).
+    console.log(topUp.confirmUrl);
+    break;
+  case 'processing':
+    // On its way: read it again later with the same key.
+    break;
+  case 'declined':
+    console.log(topUp.reason, topUp.message); // nothing was charged
+    break;
+}
+
+// The same key never charges twice: it answers the same top-up with its current status.
+const again = await rc.billing.topUp({ amountUsd: 50, idempotencyKey: topUp.idempotencyKey });
+```
+
+Without an `idempotencyKey` the SDK makes a new one (a UUID) for each call and returns it on the result, so keep it to retry or to read a `processing` or `requires_action` top-up. Pass your own (a job id, say) to make the top-up safe across restarts. Retries the SDK makes itself reuse the call's key, and while that top-up is being charged the SDK waits and asks again for its answer. When `topUp` throws (a timeout, a lost connection, any API error), the error carries the key as `err.idempotencyKey`: call `topUp` again with it and the same amount to read what happened, never a new key, which could charge twice.
+
+```typescript
+const recharge = await rc.billing.getAutoRecharge();
+// { enabled, thresholdUsd, targetUsd, lastFailureReason, lastFailureAt }
+
+// Recharge to $200 whenever the balance falls below $25. Needs the billing permission on
+// a key made by an owner or manager; threshold and target are required even to turn it off.
+await rc.billing.setAutoRecharge({ enabled: true, thresholdUsd: 25, targetUsd: 200 });
+
+const cards = await rc.billing.listPaymentMethods();
+// [{ type: 'card', brand: 'visa', last4: '4242', expMonth: 12, expYear: 2030, default: true }]
+```
+
+Top-up errors: `PermissionDeniedError` with `code` `BILLING_PERMISSION_REQUIRED` (no billing permission on this key); `InsufficientCreditsError` with `code` `TOPUP_CAP_REACHED` (`details` says which cap, what remains and when it resets), `NO_PAYMENT_METHOD` or `PAYMENT_HOLD`; `ConflictError` with `code` `IDEMPOTENCY_KEY_REUSED` (the key was used for another amount) or `conflict` (that top-up was still being charged after the SDK's retries: send the same key again in a few seconds). Every one carries `idempotencyKey`.
+
+```typescript
+try {
+  await rc.billing.topUp({ amountUsd: 50 });
+} catch (err) {
+  if (err instanceof RuncrateError && err.idempotencyKey) {
+    // Later: rc.billing.topUp({ amountUsd: 50, idempotencyKey: err.idempotencyKey })
+  }
+}
 ```
 
 ## Error Handling
@@ -358,6 +415,7 @@ const rc = new Runcrate({
 Reads, updates and deletes are retried on 429, 5xx, timeouts and lost connections. A request that creates or launches something is never sent twice by accident:
 
 - Job submits and reruns send an `Idempotency-Key`, which the server honours, so they are retried like reads.
+- A top-up sends its key (in the body and as `Idempotency-Key`) on every retry of the call, and the server answers the same top-up for the same key, so it is retried like a read and never charges twice. While the first request with the key is still being charged, the SDK waits and asks again.
 - Instance, schedule and volume creates also send an `Idempotency-Key`, but those routes do not deduplicate it yet; `schedules.runNow` sends none. Once one of these, or a run-now, may have reached Runcrate (a timeout, a lost connection, a 500, 502 or 504) it is not sent again and the error is thrown: check `instances.list()` before launching again. Only a 429 or 503, which say nothing was launched, and a connection that never opened are retried.
 - A launch waits at least 75 seconds (a job submit 135) for its answer, whatever `timeout` is, so the client does not give up while the server is still launching.
 
